@@ -1,10 +1,14 @@
 import { google } from "@ai-sdk/google";
+import { groq } from "@ai-sdk/groq";
 import {
   streamText,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
   tool,
   convertToModelMessages,
   UIMessage,
   stepCountIs,
+  LanguageModel,
 } from "ai";
 import { z } from "zod";
 
@@ -15,27 +19,59 @@ interface NrqlMetricRow {
   pageViews?: number;
 }
 
-export async function POST(req: Request) {
-  const { messages }: { messages: UIMessage[] } = await req.json();
+function isQuotaOrRateLimitError(err: unknown): boolean {
+  const parts: string[] = [];
 
-  const result = streamText({
-    model: google("gemini-3.8-flash"),
+  if (err instanceof Error) {
+    parts.push(err.message, err.name);
+  }
+
+  if (typeof err === "object" && err !== null) {
+    const anyErr = err as {
+      statusCode?: number;
+      responseBody?: string;
+      message?: string;
+    };
+    if (anyErr.statusCode === 429) parts.push("429");
+    if (typeof anyErr.responseBody === "string")
+      parts.push(anyErr.responseBody);
+    if (typeof anyErr.message === "string") parts.push(anyErr.message);
+    try {
+      parts.push(JSON.stringify(err));
+    } catch {
+      // игнорируем циклические ссылки, если есть
+    }
+  } else {
+    parts.push(String(err));
+  }
+
+  const combined = parts.join(" ").toLowerCase();
+  return (
+    combined.includes("429") ||
+    combined.includes("quota exceeded") ||
+    combined.includes("rate limit") ||
+    combined.includes("resource_exhausted")
+  );
+}
+
+function buildStreamResult(
+  model: LanguageModel,
+  modelMessages: Awaited<ReturnType<typeof convertToModelMessages>>,
+  onError?: (event: { error: unknown }) => void,
+) {
+  return streamText({
+    model,
     system:
       "You are an observability assistant. When the user asks about website traffic, page views, or browser latency from New Relic, call getNewRelicMetrics.",
-    messages: await convertToModelMessages(messages),
+    messages: modelMessages,
     stopWhen: stepCountIs(3),
+    onError,
     tools: {
       getNewRelicMetrics: tool({
         description:
-          "Fetch real browser metrics (page views and average duration) from New Relic EU via NerdGraph NRQL",
+          "Fetch real browser metrics from New Relic EU via NerdGraph NRQL",
         inputSchema: z.object({
-          sinceMinutes: z
-            .number()
-            .int()
-            .min(5)
-            .max(1440)
-            .default(60)
-            .describe("Time window in minutes, e.g. 60 for the last hour"),
+          sinceMinutes: z.number().int().min(5).max(1440).default(60),
         }),
         execute: async ({ sinceMinutes }) => {
           const accountId = process.env.NEW_RELIC_ACCOUNT_ID;
@@ -112,6 +148,55 @@ export async function POST(req: Request) {
       }),
     },
   });
+}
 
-  return result.toUIMessageStreamResponse();
+export async function POST(req: Request) {
+  const { messages }: { messages: UIMessage[] } = await req.json();
+  const modelMessages = await convertToModelMessages(messages);
+
+  const primaryModel = google("gemini-3.8-flash");
+  const fallbackModel = groq("qwen/qwen3.8-27b");
+
+  const stream = createUIMessageStream({
+    execute: async ({ writer }) => {
+      let quotaExceeded = false;
+
+      const primary = buildStreamResult(
+        primaryModel,
+        modelMessages,
+        ({ error }) => {
+          if (isQuotaOrRateLimitError(error)) {
+            quotaExceeded = true;
+          }
+        },
+      );
+
+      // Читаем primary без отправки чанка ошибки в клиентский UI-поток
+      try {
+        for await (const _ of primary.fullStream) {
+          // ждём завершения потока
+        }
+      } catch (err) {
+        if (isQuotaOrRateLimitError(err)) {
+          quotaExceeded = true;
+        } else {
+          throw err;
+        }
+      }
+
+      if (quotaExceeded) {
+        console.warn("Switching to fallback model: qwen/qwen3.8-27b");
+        const fallback = buildStreamResult(fallbackModel, modelMessages);
+        writer.merge(fallback.toUIMessageStream());
+        await fallback.consumeStream();
+        return;
+      }
+
+      // Если primary отработал без ошибки квоты — отдаём его UI-поток
+      writer.merge(primary.toUIMessageStream());
+      await primary.consumeStream();
+    },
+  });
+
+  return createUIMessageStreamResponse({ stream });
 }

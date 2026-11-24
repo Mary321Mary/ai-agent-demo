@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@ai-sdk/google": "^4.0.125",
+    "@ai-sdk/groq": "^4.0.86",
     "@ai-sdk/react": "^4.0.186",
     "ai": "^7.0.181",
     "motion": "^14.14.0",
