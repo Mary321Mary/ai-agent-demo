@@ -75,11 +75,11 @@ function buildStreamResult(
         }),
         execute: async ({ sinceMinutes }) => {
           const accountId = process.env.NEW_RELIC_ACCOUNT_ID;
-          const apiKey = process.env.NEW_RELIC_USER_API_KEY;
+          const apiKey = process.env.NEW_RELIC_API_KEY;
 
           if (!accountId || !apiKey) {
             throw new Error(
-              "Missing NEW_RELIC_ACCOUNT_ID or NEW_RELIC_USER_API_KEY",
+              "Missing NEW_RELIC_ACCOUNT_ID or NEW_RELIC_API_KEY",
             );
           }
 
