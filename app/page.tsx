@@ -22,7 +22,8 @@ export default function ChatPage() {
       <header className="mb-4 border-b pb-3">
         <h1 className="text-xl font-semibold">AI Ops & Analytics Assistant</h1>
         <p className="text-sm text-gray-500">
-          Try asking: &ldquo;Check metrics for auth-api&rdquo;
+          Try asking: &ldquo;Fetch real-time web performance metrics from New
+          Relic&rdquo;
         </p>
       </header>
 
@@ -60,62 +61,63 @@ export default function ChatPage() {
                   }
 
                   // 2. Generative UI: рендер карточки при вызове getSystemMetrics
-                  if (part.type === "tool-getSystemMetrics") {
+                  if (part.type === "tool-getNewRelicMetrics") {
                     if (part.state !== "output-available") {
                       return (
                         <div
                           key={idx}
-                          className="my-2 animate-pulse rounded-xl border border-gray-300 bg-white p-3 text-xs text-gray-500"
+                          className="my-2 animate-pulse rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-500"
                         >
-                          Fetching live telemetry...
+                          Querying New Relic EU (NerdGraph)...
                         </div>
                       );
                     }
 
-                    const data = part.output as {
-                      service: string;
-                      cpuUsage: number;
-                      latencyMs: number;
-                      status: string;
-                      updatedAt: string;
+                    const metrics = part.output as {
+                      region: string;
+                      windowMinutes: number;
+                      pageViews: number;
+                      avgDurationMs: number;
+                      fetchedAt: string;
                     };
 
                     return (
                       <motion.div
                         key={idx}
-                        initial={{ opacity: 0, scale: 0.95 }}
+                        initial={{ opacity: 0, scale: 0.96 }}
                         animate={{ opacity: 1, scale: 1 }}
                         transition={{
                           type: "spring",
-                          stiffness: 400,
+                          stiffness: 380,
                           damping: 28,
                         }}
                         className="my-2 rounded-xl border border-gray-200 bg-white p-4 shadow-sm"
                       >
-                        <div className="mb-2 flex items-center justify-between">
-                          <span className="font-mono text-xs font-bold uppercase text-gray-700">
-                            {data.service}
+                        <div className="mb-2 flex items-center justify-between text-xs">
+                          <span className="font-mono font-semibold text-gray-700">
+                            New Relic ({metrics.region}) ·{" "}
+                            {metrics.windowMinutes}m
                           </span>
-                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
-                            {data.status}
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 font-medium text-emerald-700">
+                            live
                           </span>
                         </div>
                         <div className="grid grid-cols-2 gap-3 text-xs">
-                          <div className="rounded-lg bg-gray-50 p-2">
-                            <div className="text-gray-500">CPU Load</div>
+                          <div className="rounded-lg bg-gray-50 p-2.5">
+                            <div className="text-gray-500">Page Views</div>
                             <div className="text-base font-semibold">
-                              {data.cpuUsage}%
+                              {metrics.pageViews}
                             </div>
                           </div>
-                          <div className="rounded-lg bg-gray-50 p-2">
-                            <div className="text-gray-500">P95 Latency</div>
+                          <div className="rounded-lg bg-gray-50 p-2.5">
+                            <div className="text-gray-500">Avg Duration</div>
                             <div className="text-base font-semibold">
-                              {data.latencyMs} ms
+                              {metrics.avgDurationMs} ms
                             </div>
                           </div>
                         </div>
                         <div className="mt-2 text-right text-[11px] text-gray-400">
-                          Updated at {data.updatedAt}
+                          Updated at {metrics.fetchedAt}
                         </div>
                       </motion.div>
                     );
