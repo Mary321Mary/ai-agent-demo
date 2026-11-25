@@ -30,7 +30,9 @@ function buildStreamResult(
       "You are an observability assistant for New Relic EU (app: 'ai-agent-demo'). " +
       "Call getNewRelicMetrics for website traffic, page views, or average browser load duration. " +
       "Call getNewRelicErrorsAndSlowPages for JavaScript errors, failures, slow pages, or p95 latency. " +
-      "Call fallbackAssistant ONLY when the request is outside these browser telemetry metrics or requires actions/investigations not covered by them.",
+      "Call fallbackAssistant ONLY when the request is outside these browser telemetry metrics or requires actions/investigations not covered by them." +
+      "When a UI tool card renders metrics, errors, or page tables, do NOT repeat raw tables or " +
+      "duplicate the full list in text. Provide only a concise 1-2 sentence insight or caveat below the card.",
     messages: modelMessages,
     stopWhen: stepCountIs(3),
     onError,

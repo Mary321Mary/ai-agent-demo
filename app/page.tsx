@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { NewRelicErrorsCard } from "./components/NewRelicErrorsCard";
 import { NewRelicMetricsCard } from "./components/NewRelicMetricsCard";
 import { QUICK_PROMPTS } from "./utils/constants";
+import { MarkdownMessage } from "./components/MarkdownMessage";
 
 export default function ChatPage() {
   const [input, setInput] = useState("");
@@ -136,7 +137,10 @@ export default function ChatPage() {
                   >
                     {message.parts.map((part, idx) => {
                       if (part.type === "text") {
-                        return (
+                        if (!part.text.trim()) return null;
+                        return message.role === "assistant" ? (
+                          <MarkdownMessage key={idx} content={part.text} />
+                        ) : (
                           <p
                             key={idx}
                             className="whitespace-pre-wrap leading-relaxed"
