@@ -11,48 +11,13 @@ import {
   LanguageModel,
 } from "ai";
 import { z } from "zod";
+import {
+  isQuotaOrRateLimitError,
+  NrqlMetricRow,
+  runNewRelicNrql,
+} from "../../utils/newRelic";
 
 export const maxDuration = 30;
-
-interface NrqlMetricRow {
-  avgDurationSec?: number;
-  pageViews?: number;
-}
-
-function isQuotaOrRateLimitError(err: unknown): boolean {
-  const parts: string[] = [];
-
-  if (err instanceof Error) {
-    parts.push(err.message, err.name);
-  }
-
-  if (typeof err === "object" && err !== null) {
-    const anyErr = err as {
-      statusCode?: number;
-      responseBody?: string;
-      message?: string;
-    };
-    if (anyErr.statusCode === 429) parts.push("429");
-    if (typeof anyErr.responseBody === "string")
-      parts.push(anyErr.responseBody);
-    if (typeof anyErr.message === "string") parts.push(anyErr.message);
-    try {
-      parts.push(JSON.stringify(err));
-    } catch {
-      // игнорируем циклические ссылки, если есть
-    }
-  } else {
-    parts.push(String(err));
-  }
-
-  const combined = parts.join(" ").toLowerCase();
-  return (
-    combined.includes("429") ||
-    combined.includes("quota exceeded") ||
-    combined.includes("rate limit") ||
-    combined.includes("resource_exhausted")
-  );
-}
 
 function buildStreamResult(
   model: LanguageModel,
@@ -62,7 +27,10 @@ function buildStreamResult(
   return streamText({
     model,
     system:
-      "You are an observability assistant. When the user asks about website traffic, page views, or browser latency from New Relic, call getNewRelicMetrics.",
+      "You are an observability assistant for New Relic EU (app: 'ai-agent-demo'). " +
+      "Call getNewRelicMetrics for website traffic, page views, or average browser load duration. " +
+      "Call getNewRelicErrorsAndSlowPages for JavaScript errors, failures, slow pages, or p95 latency. " +
+      "Call fallbackAssistant ONLY when the request is outside these browser telemetry metrics or requires actions/investigations not covered by them.",
     messages: modelMessages,
     stopWhen: stepCountIs(3),
     onError,
@@ -74,64 +42,18 @@ function buildStreamResult(
           sinceMinutes: z.number().int().min(5).max(1440).default(60),
         }),
         execute: async ({ sinceMinutes }) => {
-          const accountId = process.env.NEW_RELIC_ACCOUNT_ID;
-          const apiKey = process.env.NEW_RELIC_API_KEY;
+          const rawMinutes =
+            typeof sinceMinutes === "number" ? sinceMinutes : 60;
+          const safeMinutes = Math.min(
+            1440,
+            Math.max(5, Math.trunc(rawMinutes)),
+          );
+          const rows = await runNewRelicNrql(
+            `SELECT average(duration) as avgDurationSec, count(*) as pageViews ` +
+              `FROM PageView WHERE appName = 'ai-agent-demo' SINCE ${safeMinutes} minutes ago`,
+          );
 
-          if (!accountId || !apiKey) {
-            throw new Error(
-              "Missing NEW_RELIC_ACCOUNT_ID or NEW_RELIC_API_KEY",
-            );
-          }
-
-          // Экранируем числовое окно времени и формируем NRQL-запрос
-          const nrql = `SELECT average(duration) as avgDurationSec, count(*) as pageViews FROM PageView SINCE ${sinceMinutes} minutes ago`;
-
-          const graphqlQuery = `
-            query GetBrowserMetrics($accountId: Int!, $nrql: Nrql!) {
-              actor {
-                account(id: $accountId) {
-                  nrql(query: $nrql) {
-                    results
-                  }
-                }
-              }
-            }
-          `;
-
-          const response = await fetch("https://api.eu.newrelic.com/graphql", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "API-Key": apiKey,
-            },
-            body: JSON.stringify({
-              query: graphqlQuery,
-              variables: {
-                accountId: Number(accountId),
-                nrql,
-              },
-            }),
-            cache: "no-store",
-          });
-
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(
-              `New Relic API error (${response.status}): ${errorText}`,
-            );
-          }
-
-          const payload = await response.json();
-
-          if (payload.errors?.length) {
-            throw new Error(
-              `NerdGraph query error: ${payload.errors.map((e: { message: string }) => e.message).join("; ")}`,
-            );
-          }
-
-          const row: NrqlMetricRow =
-            payload.data?.actor?.account?.nrql?.results?.[0] ?? {};
-
+          const row = (rows[0] ?? {}) as NrqlMetricRow;
           const pageViews = Number(row.pageViews ?? 0);
           const avgDurationMs = Math.round(
             Number(row.avgDurationSec ?? 0) * 1000,
@@ -139,10 +61,88 @@ function buildStreamResult(
 
           return {
             region: "EU",
-            windowMinutes: sinceMinutes,
+            windowMinutes: safeMinutes,
             pageViews,
             avgDurationMs,
             fetchedAt: new Date().toLocaleTimeString(),
+          };
+        },
+      }),
+      getNewRelicErrorsAndSlowPages: tool({
+        description:
+          "Fetch browser JavaScript error counts and slowest pages (p95 duration) " +
+          "from New Relic EU when the user asks about errors, failures, slow pages, or p95 latency.",
+        inputSchema: z.object({
+          sinceMinutes: z.number().int().min(5).max(1440).default(60),
+        }),
+        execute: async ({ sinceMinutes }) => {
+          const safeMinutes = Math.min(
+            1440,
+            Math.max(5, Math.trunc(sinceMinutes)),
+          );
+
+          const [errorRows, slowPageRows] = await Promise.all([
+            runNewRelicNrql(
+              `SELECT count(*) as errorCount FROM JavaScriptError ` +
+                `WHERE appName = 'ai-agent-demo' SINCE ${safeMinutes} minutes ago`,
+            ).catch(() => []),
+            runNewRelicNrql(
+              `SELECT percentile(duration, 95) as p95Sec, count(*) as hits ` +
+                `FROM PageView WHERE appName = 'ai-agent-demo' FACET pageUrl ` +
+                `SINCE ${safeMinutes} minutes ago LIMIT 5`,
+            ).catch(() => []),
+          ]);
+
+          const errorCount = Number(errorRows[0]?.errorCount ?? 0);
+          const slowestPages = slowPageRows.map((row) => ({
+            pageUrl: String(row.facet ?? row.pageUrl ?? "unknown"),
+            p95DurationMs: Math.round(Number(row.p95Sec ?? 0) * 1000),
+            hits: Number(row.hits ?? 0),
+          }));
+
+          return {
+            region: "EU",
+            windowMinutes: safeMinutes,
+            errorCount,
+            slowestPages,
+            fetchedAt: new Date().toLocaleTimeString(),
+          };
+        },
+      }),
+      fallbackAssistant: tool({
+        description:
+          "Use ONLY when the user asks something outside New Relic browser telemetry " +
+          "(PageView count, average load duration, JS error count, and p95 slowest pages) " +
+          "or asks for actions/investigations that cannot be answered directly from available telemetry. " +
+          "Returns guidance, limitations, and next steps.",
+        inputSchema: z.object({
+          topic: z
+            .string()
+            .describe("Short summary of what the user is asking about"),
+          reason: z
+            .enum([
+              "out_of_scope_metric",
+              "requires_action",
+              "insufficient_data",
+            ])
+            .describe("Why telemetry tools do not cover the request"),
+        }),
+        execute: async ({ topic, reason }) => {
+          return {
+            handledByFallbackTool: true,
+            topic,
+            reason,
+            supportedMetrics: [
+              "PageView count",
+              "Average page load duration (ms)",
+              "JavaScript error count",
+              "Slowest pages (p95 duration & hit count)",
+            ],
+            supportedRegion: "EU",
+            suggestions: [
+              "Specify a time window in minutes (for example, last 30 or 60 minutes) for browser metrics.",
+              "Check New Relic UI directly for deeper traces, logs, or alert configuration.",
+            ],
           };
         },
       }),
@@ -171,7 +171,6 @@ export async function POST(req: Request) {
         },
       );
 
-      // Читаем primary без отправки чанка ошибки в клиентский UI-поток
       try {
         for await (const _ of primary.fullStream) {
           // ждём завершения потока
@@ -192,7 +191,6 @@ export async function POST(req: Request) {
         return;
       }
 
-      // Если primary отработал без ошибки квоты — отдаём его UI-поток
       writer.merge(primary.toUIMessageStream());
       await primary.consumeStream();
     },

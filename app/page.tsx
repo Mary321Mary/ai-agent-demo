@@ -3,10 +3,12 @@
 import { useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { motion, AnimatePresence } from "motion/react";
+import { NewRelicErrorsCard } from "./components/NewRelicErrorsCard";
+import { NewRelicMetricsCard } from "./components/NewRelicMetricsCard";
 
 export default function ChatPage() {
   const [input, setInput] = useState("");
-  const { messages, sendMessage, status, stop } = useChat();
+  const { messages, sendMessage, status, stop, error } = useChat();
 
   const isLoading = status === "submitted" || status === "streaming";
 
@@ -27,7 +29,6 @@ export default function ChatPage() {
         </p>
       </header>
 
-      {/* Список сообщений */}
       <div className="flex-1 space-y-4 overflow-y-auto pr-2">
         <AnimatePresence initial={false}>
           {messages.map((message) => (
@@ -48,7 +49,6 @@ export default function ChatPage() {
                 }`}
               >
                 {message.parts.map((part, idx) => {
-                  // 1. Обычный стриминговый текст
                   if (part.type === "text") {
                     return (
                       <p
@@ -60,66 +60,60 @@ export default function ChatPage() {
                     );
                   }
 
-                  // 2. Generative UI: рендер карточки при вызове getSystemMetrics
-                  if (part.type === "tool-getNewRelicMetrics") {
+                  if (part.type === "tool-fallbackAssistant") {
                     if (part.state !== "output-available") {
                       return (
-                        <div
-                          key={idx}
-                          className="my-2 animate-pulse rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-500"
-                        >
-                          Querying New Relic EU (NerdGraph)...
-                        </div>
+                        <p key={idx} className="text-xs text-gray-500">
+                          Checking available diagnostics &amp; boundaries...
+                        </p>
                       );
                     }
 
-                    const metrics = part.output as {
-                      region: string;
-                      windowMinutes: number;
-                      pageViews: number;
-                      avgDurationMs: number;
-                      fetchedAt: string;
+                    const fallbackData = part.output as {
+                      topic?: string;
+                      supportedMetrics?: string[];
+                      suggestions?: string[];
                     };
 
                     return (
-                      <motion.div
+                      <div
                         key={idx}
-                        initial={{ opacity: 0, scale: 0.96 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        transition={{
-                          type: "spring",
-                          stiffness: 380,
-                          damping: 28,
-                        }}
-                        className="my-2 rounded-xl border border-gray-200 bg-white p-4 shadow-sm"
+                        className="space-y-1.5 text-xs text-gray-700"
                       >
-                        <div className="mb-2 flex items-center justify-between text-xs">
-                          <span className="font-mono font-semibold text-gray-700">
-                            New Relic ({metrics.region}) ·{" "}
-                            {metrics.windowMinutes}m
-                          </span>
-                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 font-medium text-emerald-700">
-                            live
-                          </span>
-                        </div>
-                        <div className="grid grid-cols-2 gap-3 text-xs">
-                          <div className="rounded-lg bg-gray-50 p-2.5">
-                            <div className="text-gray-500">Page Views</div>
-                            <div className="text-base font-semibold">
-                              {metrics.pageViews}
-                            </div>
+                        {fallbackData.topic && (
+                          <div className="font-medium text-gray-900">
+                            Topic: {fallbackData.topic}
                           </div>
-                          <div className="rounded-lg bg-gray-50 p-2.5">
-                            <div className="text-gray-500">Avg Duration</div>
-                            <div className="text-base font-semibold">
-                              {metrics.avgDurationMs} ms
-                            </div>
-                          </div>
-                        </div>
-                        <div className="mt-2 text-right text-[11px] text-gray-400">
-                          Updated at {metrics.fetchedAt}
-                        </div>
-                      </motion.div>
+                        )}
+                        {fallbackData.suggestions &&
+                          fallbackData.suggestions.length > 0 && (
+                            <ul className="list-disc space-y-1 pl-4">
+                              {fallbackData.suggestions.map((item, sIdx) => (
+                                <li key={sIdx}>{item}</li>
+                              ))}
+                            </ul>
+                          )}
+                      </div>
+                    );
+                  }
+
+                  if (part.type === "tool-getNewRelicMetrics") {
+                    return (
+                      <NewRelicMetricsCard
+                        key={idx}
+                        state={part.state}
+                        output={part.output}
+                      />
+                    );
+                  }
+
+                  if (part.type === "tool-getNewRelicErrorsAndSlowPages") {
+                    return (
+                      <NewRelicErrorsCard
+                        key={idx}
+                        state={part.state}
+                        output={part.output}
+                      />
                     );
                   }
 
@@ -131,7 +125,6 @@ export default function ChatPage() {
         </AnimatePresence>
       </div>
 
-      {/* Поле ввода */}
       <form onSubmit={handleSubmit} className="mt-4 flex gap-2">
         <input
           value={input}
