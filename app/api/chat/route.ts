@@ -22,7 +22,11 @@ export const maxDuration = 30;
 function buildStreamResult(
   model: LanguageModel,
   modelMessages: Awaited<ReturnType<typeof convertToModelMessages>>,
-  onError?: (event: { error: unknown }) => void,
+  options?: {
+    maxRetries?: number;
+    timeoutMs?: number;
+    onError?: (event: { error: unknown }) => void;
+  },
 ) {
   return streamText({
     model,
@@ -35,7 +39,11 @@ function buildStreamResult(
       "duplicate the full list in text. Provide only a concise 1-2 sentence insight or caveat below the card.",
     messages: modelMessages,
     stopWhen: stepCountIs(3),
-    onError,
+    maxRetries: options?.maxRetries ?? 0,
+    abortSignal: options?.timeoutMs
+      ? AbortSignal.timeout(options.timeoutMs)
+      : undefined,
+    onError: (event) => options?.onError?.(event),
     tools: {
       getNewRelicMetrics: tool({
         description:
@@ -161,33 +169,51 @@ export async function POST(req: Request) {
 
   const stream = createUIMessageStream({
     execute: async ({ writer }) => {
-      let quotaExceeded = false;
+      let shouldFallback = false;
+      let hasContent = false;
 
-      const primary = buildStreamResult(
-        primaryModel,
-        modelMessages,
-        ({ error }) => {
+      const primary = buildStreamResult(primaryModel, modelMessages, {
+        maxRetries: 0,
+        timeoutMs: 8000,
+        onError: ({ error }) => {
           if (isQuotaOrRateLimitError(error)) {
-            quotaExceeded = true;
+            shouldFallback = true;
           }
         },
-      );
+      });
 
       try {
-        for await (const _ of primary.fullStream) {
-          // ждём завершения потока
+        for await (const chunk of primary.fullStream) {
+          if (
+            chunk.type === "text-delta" ||
+            chunk.type === "tool-call" ||
+            chunk.type === "tool-input-start"
+          ) {
+            hasContent = true;
+          }
+
+          if (chunk.type === "error") {
+            if (isQuotaOrRateLimitError(chunk.error)) {
+              shouldFallback = true;
+              break;
+            }
+            throw chunk.error;
+          }
         }
       } catch (err) {
         if (isQuotaOrRateLimitError(err)) {
-          quotaExceeded = true;
+          shouldFallback = true;
         } else {
           throw err;
         }
       }
 
-      if (quotaExceeded) {
+      if (shouldFallback && !hasContent) {
         console.warn("Switching to fallback model: qwen/qwen3.8-27b");
-        const fallback = buildStreamResult(fallbackModel, modelMessages);
+        const fallback = buildStreamResult(fallbackModel, modelMessages, {
+          maxRetries: 1,
+          timeoutMs: 20000,
+        });
         writer.merge(fallback.toUIMessageStream());
         await fallback.consumeStream();
         return;

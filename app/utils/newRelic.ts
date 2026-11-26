@@ -78,35 +78,99 @@ export async function runNewRelicNrql(
 
 export function isQuotaOrRateLimitError(err: unknown): boolean {
   const parts: string[] = [];
+  let isTimeoutOrAbort = false;
 
-  if (err instanceof Error) {
-    parts.push(err.message, err.name);
-  }
+  const collect = (value: unknown, depth = 0) => {
+    if (!value || depth > 4) return;
 
-  if (typeof err === "object" && err !== null) {
-    const anyErr = err as {
-      statusCode?: number;
-      responseBody?: string;
-      message?: string;
-    };
-    if (anyErr.statusCode === 429) parts.push("429");
-    if (typeof anyErr.responseBody === "string")
-      parts.push(anyErr.responseBody);
-    if (typeof anyErr.message === "string") parts.push(anyErr.message);
-    try {
-      parts.push(JSON.stringify(err));
-    } catch {
-      // ignore circular links, if exists
+    if (value instanceof Error) {
+      parts.push(value.message, value.name);
+      const lowerName = value.name.toLowerCase();
+      if (lowerName === "timeouterror" || lowerName === "aborterror") {
+        isTimeoutOrAbort = true;
+      }
+      if (value.cause) collect(value.cause, depth + 1);
     }
-  } else {
-    parts.push(String(err));
+
+    if (typeof value === "object") {
+      const anyErr = value as {
+        statusCode?: number;
+        code?: string | number;
+        name?: string;
+        responseBody?: string;
+        message?: string;
+        lastError?: unknown;
+        errors?: unknown[];
+      };
+
+      if (typeof anyErr.name === "string") {
+        parts.push(anyErr.name);
+        const lowerName = anyErr.name.toLowerCase();
+        if (lowerName === "timeouterror" || lowerName === "aborterror") {
+          isTimeoutOrAbort = true;
+        }
+      }
+      if (anyErr.code !== undefined) {
+        parts.push(String(anyErr.code));
+        const lowerCode = String(anyErr.code).toLowerCase();
+        if (
+          lowerCode.includes("timeout") ||
+          lowerCode.includes("abort") ||
+          lowerCode === "23" // DOMException TIMEOUT_ERR
+        ) {
+          isTimeoutOrAbort = true;
+        }
+      }
+      if (typeof anyErr.statusCode === "number") {
+        parts.push(String(anyErr.statusCode));
+      }
+      if (typeof anyErr.responseBody === "string") {
+        parts.push(anyErr.responseBody);
+      }
+      if (typeof anyErr.message === "string") {
+        parts.push(anyErr.message);
+      }
+      if (anyErr.lastError) {
+        collect(anyErr.lastError, depth + 1);
+      }
+      if (Array.isArray(anyErr.errors)) {
+        for (const inner of anyErr.errors) {
+          collect(inner, depth + 1);
+        }
+      }
+
+      try {
+        parts.push(JSON.stringify(value));
+      } catch {
+        // ignore circular links, if exists
+      }
+    } else {
+      parts.push(String(value));
+    }
+  };
+
+  collect(err);
+
+  if (isTimeoutOrAbort) {
+    return true;
   }
 
   const combined = parts.join(" ").toLowerCase();
   return (
     combined.includes("429") ||
+    combined.includes("503") ||
+    combined.includes("502") ||
+    combined.includes("504") ||
     combined.includes("quota exceeded") ||
     combined.includes("rate limit") ||
+    combined.includes("unavailable") ||
+    combined.includes("high demand") ||
+    combined.includes("overloaded") ||
+    combined.includes("timeout") ||
+    combined.includes("timed out") ||
+    combined.includes("timeouterror") ||
+    combined.includes("aborterror") ||
+    combined.includes("aborted") ||
     combined.includes("resource_exhausted")
   );
 }
